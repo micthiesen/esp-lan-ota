@@ -142,7 +142,11 @@ async fn run(command: Command, path: PathBuf) -> Result<()> {
         Command::SetAddress { name, address } => {
             let mut store = Store::load(&path)?.context("no fabric")?;
             let addr = parse_addr(&address)?;
-            store.devices.get_mut(&name).context("unknown device")?.address = Some(addr.to_string());
+            store
+                .devices
+                .get_mut(&name)
+                .context("unknown device")?
+                .address = Some(addr.to_string());
             store.save(&path)?;
             Ok(())
         }
@@ -164,7 +168,17 @@ async fn run(command: Command, path: PathBuf) -> Result<()> {
                 (None, None) => None,
                 _ => bail!("give both --wifi-ssid and --wifi-password"),
             };
-            enroll(&mut store, &path, &name, serial, code, address, wifi, Duration::from_secs(timeout)).await
+            enroll(
+                &mut store,
+                &path,
+                &name,
+                serial,
+                code,
+                address,
+                wifi,
+                Duration::from_secs(timeout),
+            )
+            .await
         }
         Command::Status { name } => {
             let mut store = Store::load(&path)?.context("no fabric; enroll a device first")?;
@@ -200,7 +214,9 @@ async fn run(command: Command, path: PathBuf) -> Result<()> {
                         comm.compute_pretty_pairing_code()
                     );
                 }
-                _ => println!("Pairing window open for 15 minutes; use the device's own setup code."),
+                _ => {
+                    println!("Pairing window open for 15 minutes; use the device's own setup code.")
+                }
             }
             Ok(())
         }
@@ -210,7 +226,17 @@ async fn run(command: Command, path: PathBuf) -> Result<()> {
             espflash_args,
             confirm_timeout,
             no_wait,
-        } => push(&path, &name, &firmware, &espflash_args, Duration::from_secs(confirm_timeout), no_wait).await,
+        } => {
+            push(
+                &path,
+                &name,
+                &firmware,
+                &espflash_args,
+                Duration::from_secs(confirm_timeout),
+                no_wait,
+            )
+            .await
+        }
     }
 }
 
@@ -238,7 +264,11 @@ async fn enroll(
             eprintln!("Waiting for the enrollment line on {port} ...");
             let line = tokio::task::spawn_blocking(move || serial::read_enrollment(&port, timeout))
                 .await??;
-            (line.passcode, Discriminator::Long(line.discriminator), Some(line.discriminator))
+            (
+                line.passcode,
+                Discriminator::Long(line.discriminator),
+                Some(line.discriminator),
+            )
         }
     };
 
@@ -247,7 +277,10 @@ async fn enroll(
         None => {
             eprintln!("Looking for the device on the LAN ...");
             let window = timeout.min(Duration::from_secs(20));
-            tokio::task::spawn_blocking(move || discover::find_commissionable(discriminator, window)).await??
+            tokio::task::spawn_blocking(move || {
+                discover::find_commissionable(discriminator, window)
+            })
+            .await??
         }
     };
 
@@ -259,9 +292,14 @@ async fn enroll(
         Some(addr) => {
             eprintln!("Commissioning over IP at {addr} ...");
             ctl.run(&socket, &socket, async {
-                let operational = commission(&ctl, Address::Udp(controller::peer(addr)), passcode, node_id, None, || async {
-                    Ok(addr)
-                })
+                let operational = commission(
+                    &ctl,
+                    Address::Udp(controller::peer(addr)),
+                    passcode,
+                    node_id,
+                    None,
+                    || async { Ok(addr) },
+                )
                 .await?;
                 finish_enrollment(&ctl, node_id, operational).await
             })
@@ -273,7 +311,17 @@ async fn enroll(
                     "the device is not on the LAN; for a device that has never joined Wi-Fi pass --wifi-ssid and --wifi-password to commission over Bluetooth"
                 );
             };
-            enroll_ble(&ctl, &socket, discriminator, passcode, node_id, cfid, &wifi, timeout).await?
+            enroll_ble(
+                &ctl,
+                &socket,
+                discriminator,
+                passcode,
+                node_id,
+                cfid,
+                &wifi,
+                timeout,
+            )
+            .await?
         }
     };
 
@@ -286,7 +334,10 @@ async fn enroll(
     record.endpoint = Some(endpoint);
     store.devices.insert(name.to_owned(), record);
     store.save(path)?;
-    println!("Enrolled {name}: {} {} at {operational}", status.project, status.version);
+    println!(
+        "Enrolled {name}: {} {} at {operational}",
+        status.project, status.version
+    );
     if status.rollback == "unsupported" {
         println!("Warning: the bootloader does not roll back; flash the esp-lan-ota bootloader over USB.");
     }
@@ -298,7 +349,8 @@ async fn finish_enrollment<C: Crypto>(
     node_id: u64,
     operational: SocketAddr,
 ) -> Result<(SocketAddr, DeviceStatus, u16)> {
-    let mut client = Client::connect(ctl.matter, &ctl.crypto, ctl.fab_idx, node_id, operational).await?;
+    let mut client =
+        Client::connect(ctl.matter, &ctl.crypto, ctl.fab_idx, node_id, operational).await?;
     let endpoint = client.find_endpoint(None).await?;
     let status = client.status().await?;
     Ok((operational, status, endpoint))
@@ -325,26 +377,35 @@ async fn enroll_ble<C: Crypto>(
     };
     let link = BleTransport::open(ble_filter, timeout).await?;
     let ble_addr = link.address();
-    let net = ChainedNetwork::new(|addr: &Address| matches!(addr, Address::Btp(_)), &link, socket);
+    let is_btp = |addr: &Address| matches!(addr, Address::Btp(_));
+    let send = ChainedNetwork::new(is_btp, &link, socket);
+    let recv = ChainedNetwork::new(is_btp, &link, socket);
     let result = {
-        let task = ctl.run(&net, &net, async {
-            let operational = commission(ctl, Address::Btp(ble_addr), passcode, node_id, Some(wifi), || async {
-                eprintln!("Device joined Wi-Fi; finding it on the LAN ...");
-                tokio::task::spawn_blocking(move || {
-                    discover::find_operational(cfid, node_id, Duration::from_secs(60))
-                })
-                .await??
-                .context("the device did not appear on the LAN after joining Wi-Fi")
-            })
+        let task = ctl.run(send, recv, async {
+            let operational = commission(
+                ctl,
+                Address::Btp(ble_addr),
+                passcode,
+                node_id,
+                Some(wifi),
+                || async {
+                    eprintln!("Device joined Wi-Fi; finding it on the LAN ...");
+                    tokio::task::spawn_blocking(move || {
+                        discover::find_operational(cfid, node_id, Duration::from_secs(60))
+                    })
+                    .await??
+                    .context("the device did not appear on the LAN after joining Wi-Fi")
+                },
+            )
             .await?;
             finish_enrollment(ctl, node_id, operational).await
         });
         let pump = link.run();
         match embassy_futures::select::select(task, pump).await {
             embassy_futures::select::Either::First(result) => result,
-            embassy_futures::select::Either::Second(result) => {
-                Err(result.err().unwrap_or_else(|| anyhow::anyhow!("Bluetooth link closed")))
-            }
+            embassy_futures::select::Either::Second(result) => Err(result
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("Bluetooth link closed"))),
         }
     };
     link.close().await;
@@ -379,7 +440,8 @@ async fn connect<'a, C: Crypto>(
     })
     .await??
     .with_context(|| format!("{name} did not answer and was not found over mDNS"))?;
-    let mut client = Client::connect(ctl.matter, &ctl.crypto, ctl.fab_idx, device.node_id, found).await?;
+    let mut client =
+        Client::connect(ctl.matter, &ctl.crypto, ctl.fab_idx, device.node_id, found).await?;
     client.endpoint = device.endpoint.unwrap_or(1);
     if let Some(record) = store.devices.get_mut(name) {
         record.address = Some(found.to_string());
@@ -446,7 +508,9 @@ async fn push(
             );
         }
         if !before.confirmed() {
-            bail!("the running image has not confirmed itself yet; wait for it or check the device");
+            bail!(
+                "the running image has not confirmed itself yet; wait for it or check the device"
+            );
         }
         eprintln!(
             "{name}: {} -> {} ({} KiB)",
@@ -478,8 +542,17 @@ async fn push(
             println!("Staged {new_version}; the device reboots into it now.");
             return Ok(());
         }
-        drop(client);
-        wait_for_confirmation(&ctl, &mut store, path, name, &before, staged_slot, &new_version, confirm_timeout).await
+        wait_for_confirmation(
+            &ctl,
+            &mut store,
+            path,
+            name,
+            &before,
+            staged_slot,
+            &new_version,
+            confirm_timeout,
+        )
+        .await
     })
     .await
 }
@@ -503,7 +576,10 @@ async fn wait_for_confirmation<C: Crypto>(
             if seen_new {
                 bail!("{name} runs {new_version} but has not confirmed it; it rolls back on its next reset");
             }
-            bail!("{name} did not come back within {}s", confirm_timeout.as_secs());
+            bail!(
+                "{name} did not come back within {}s",
+                confirm_timeout.as_secs()
+            );
         }
         async_io::Timer::after(Duration::from_secs(4)).await;
         let probe = async {
@@ -532,4 +608,3 @@ async fn wait_for_confirmation<C: Crypto>(
         }
     }
 }
-

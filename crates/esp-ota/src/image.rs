@@ -45,7 +45,8 @@ pub fn load(path: &Path, chip: Chip, espflash_args: &[String]) -> Result<Image> 
     if bytes.len() < HEADER_PREFIX_LEN {
         bail!("image too small");
     }
-    let info = ImageInfo::parse(&bytes).map_err(|e| anyhow::anyhow!("not an ESP app image: {e:?}"))?;
+    let info =
+        ImageInfo::parse(&bytes).map_err(|e| anyhow::anyhow!("not an ESP app image: {e:?}"))?;
     let sha256 = Sha256::digest(&bytes).into();
     Ok(Image {
         bytes,

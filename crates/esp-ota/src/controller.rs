@@ -97,12 +97,8 @@ impl<C: Crypto> Controller<'static, C> {
     pub fn new(crypto: C, store: &Store) -> Result<Self> {
         let matter: &'static mut core::mem::MaybeUninit<Matter<'static>> =
             Box::leak(Box::new_uninit());
-        let matter: &'static Matter<'static> = matter.init_with(Matter::init(
-            &TEST_DEV_DET,
-            TEST_DEV_COMM,
-            &TEST_DEV_ATT,
-            0,
-        ));
+        let matter: &'static Matter<'static> =
+            matter.init_with(Matter::init(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, 0));
         let fabric = store.fabric.clone();
         let rcac = hex_bytes(&fabric.rcac)?;
         let icac = hex_bytes(&fabric.icac)?;
@@ -170,12 +166,9 @@ pub fn udp_socket() -> Result<async_io::Async<UdpSocket>> {
 /// Maps IPv4 to the IPv6-mapped form the dual-stack socket needs.
 pub fn peer(addr: SocketAddr) -> SocketAddr {
     match addr {
-        SocketAddr::V4(v4) => SocketAddr::V6(SocketAddrV6::new(
-            v4.ip().to_ipv6_mapped(),
-            v4.port(),
-            0,
-            0,
-        )),
+        SocketAddr::V4(v4) => {
+            SocketAddr::V6(SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0))
+        }
         v6 => v6,
     }
 }

@@ -169,6 +169,8 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        assert!(Store::load(&dir.path().join("missing.toml")).unwrap().is_none());
+        assert!(Store::load(&dir.path().join("missing.toml"))
+            .unwrap()
+            .is_none());
     }
 }

@@ -222,9 +222,11 @@ async fn run() {
         &kv,
         state,
     );
-    assert!(esp_lan_ota::matter::open_enrollment_window(&boot, device_matter, &device_crypto)
-        .unwrap()
-        .is_some());
+    assert!(
+        esp_lan_ota::matter::open_enrollment_window(&boot, device_matter, &device_crypto)
+            .unwrap()
+            .is_some()
+    );
     let _ = MAX_COMM_WINDOW_TIMEOUT_SECS;
     let responder = DefaultResponder::new(&dm);
     let device_socket = async_io::Async::<UdpSocket>::bind(SocketAddr::V6(SocketAddrV6::new(
@@ -282,7 +284,10 @@ async fn run() {
         let sha: [u8; 32] = Sha256::digest(&foreign).into();
         let error = client.upload(&foreign, &sha, |_, _| {}).await.unwrap_err();
         assert!(format!("{error:#}").contains("refused"), "{error:#}");
-        assert_eq!(client.status().await?.last_error_text(), "image belongs to another project");
+        assert_eq!(
+            client.status().await?.last_error_text(),
+            "image belongs to another project"
+        );
         client.abort().await?;
         // Let any session teardown after the refusal finish; the client must
         // reconnect by address on its own.
@@ -296,9 +301,7 @@ async fn run() {
         client.write(0, &update[..1024]).await?;
         client.write(1024, &update[1024..2048]).await?;
         let mut seen = 0;
-        let (slot, version) = client
-            .upload(&update, &sha, |sent, _| seen = sent)
-            .await?;
+        let (slot, version) = client.upload(&update, &sha, |sent, _| seen = sent).await?;
         assert_eq!(seen, update.len() as u32);
         assert_eq!(slot, Slot::Ota1);
         assert_eq!(version, "2.0.0");

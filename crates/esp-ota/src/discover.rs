@@ -30,7 +30,10 @@ pub fn operational_instance(compressed_fabric_id: u64, node_id: u64) -> String {
 }
 
 /// A device in commissioning mode on the LAN.
-pub fn find_commissionable(discriminator: Discriminator, timeout: Duration) -> Result<Option<SocketAddr>> {
+pub fn find_commissionable(
+    discriminator: Discriminator,
+    timeout: Duration,
+) -> Result<Option<SocketAddr>> {
     browse("_matterc._udp.local.", timeout, |info| {
         info.get_property_val_str("D")
             .and_then(|d| d.parse::<u16>().ok())

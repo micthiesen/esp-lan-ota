@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context, Result};
 use rs_matter::cert::gen::VALID_FOREVER;
-use rs_matter::cert::MAX_CERT_TLV_LEN;
 use rs_matter::cert::MAX_CERT_TLV_AND_ASN1_LEN;
+use rs_matter::cert::MAX_CERT_TLV_LEN;
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::decl::network_commissioning::{
     NetworkCommissioningClient, NetworkCommissioningStatusEnum,
@@ -51,7 +51,8 @@ where
     let mut nocs = NocGenerator::new(ctl.matter, icac_key.reference(), ctl.fab_idx, &mut noc_buf)
         .map_err(|e| anyhow!("loading fabric CA: {e:?}"))?;
     let mut buf = [0u8; MAX_CERT_TLV_LEN];
-    let mut commissioner = Commissioner::new(ctl.matter, &ctl.crypto, ctl.fab_idx, &mut nocs, &mut buf);
+    let mut commissioner =
+        Commissioner::new(ctl.matter, &ctl.crypto, ctl.fab_idx, &mut nocs, &mut buf);
     let opts = CommissionOptions {
         // rs-matter 0.2 cannot verify attestation yet; our devices use test DACs.
         allow_test_attestation: true,

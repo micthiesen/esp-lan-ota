@@ -179,38 +179,45 @@ impl<'a, C: Crypto> Client<'a, C> {
     }
 
     pub async fn status(&self) -> Result<DeviceStatus> {
-        invoke!(self, cmd::STATUS, Some(cmd::STATUS_RESPONSE), |w| {}, |data| {
-            let fields = tlv(require(data)?.r#struct())?;
-            let get = |tag: u8| tlv(fields.ctx(tag));
-            let len = tlv(get(status_field::UPLOAD_LEN)?.u32())?;
-            let next = tlv(get(status_field::UPLOAD_NEXT)?.u32())?;
-            let staged = tlv(get(status_field::STAGED)?.bool())?;
-            let state = tlv(get(status_field::IMAGE_STATE)?.u32())?;
-            Ok(DeviceStatus {
-                project: tlv(get(status_field::PROJECT)?.utf8())?.to_owned(),
-                version: tlv(get(status_field::VERSION)?.utf8())?.to_owned(),
-                chip: Chip::from_image_id(tlv(get(status_field::CHIP_ID)?.u16())?),
-                booted: if tlv(get(status_field::BOOTED_SLOT)?.u8())? == 0 {
-                    Slot::Ota0
-                } else {
-                    Slot::Ota1
-                },
-                state: (state != ImageState::Undefined.raw()).then(|| ImageState::from_raw(state)),
-                rollback: match tlv(get(status_field::ROLLBACK)?.u8())? {
-                    1 => "supported",
-                    2 => "unsupported",
-                    _ => "unknown",
-                },
-                upload: (len > 0).then_some((len, next)),
-                staged_version: staged
-                    .then(|| -> Result<String> {
-                        Ok(tlv(get(status_field::STAGED_VERSION)?.utf8())?.to_owned())
-                    })
-                    .transpose()?,
-                last_error: tlv(get(status_field::LAST_ERROR)?.u8())?,
-                max_chunk: tlv(get(status_field::MAX_CHUNK)?.u16())?,
-            })
-        })
+        invoke!(
+            self,
+            cmd::STATUS,
+            Some(cmd::STATUS_RESPONSE),
+            |w| {},
+            |data| {
+                let fields = tlv(require(data)?.r#struct())?;
+                let get = |tag: u8| tlv(fields.ctx(tag));
+                let len = tlv(get(status_field::UPLOAD_LEN)?.u32())?;
+                let next = tlv(get(status_field::UPLOAD_NEXT)?.u32())?;
+                let staged = tlv(get(status_field::STAGED)?.bool())?;
+                let state = tlv(get(status_field::IMAGE_STATE)?.u32())?;
+                Ok(DeviceStatus {
+                    project: tlv(get(status_field::PROJECT)?.utf8())?.to_owned(),
+                    version: tlv(get(status_field::VERSION)?.utf8())?.to_owned(),
+                    chip: Chip::from_image_id(tlv(get(status_field::CHIP_ID)?.u16())?),
+                    booted: if tlv(get(status_field::BOOTED_SLOT)?.u8())? == 0 {
+                        Slot::Ota0
+                    } else {
+                        Slot::Ota1
+                    },
+                    state: (state != ImageState::Undefined.raw())
+                        .then(|| ImageState::from_raw(state)),
+                    rollback: match tlv(get(status_field::ROLLBACK)?.u8())? {
+                        1 => "supported",
+                        2 => "unsupported",
+                        _ => "unknown",
+                    },
+                    upload: (len > 0).then_some((len, next)),
+                    staged_version: staged
+                        .then(|| -> Result<String> {
+                            Ok(tlv(get(status_field::STAGED_VERSION)?.utf8())?.to_owned())
+                        })
+                        .transpose()?,
+                    last_error: tlv(get(status_field::LAST_ERROR)?.u8())?,
+                    max_chunk: tlv(get(status_field::MAX_CHUNK)?.u16())?,
+                })
+            }
+        )
     }
 
     /// Starts or resumes an upload; returns the offset to send next.
@@ -248,15 +255,21 @@ impl<'a, C: Crypto> Client<'a, C> {
 
     /// Verifies and stages the image. The device reboots shortly after.
     pub async fn finish(&self) -> Result<(Slot, String)> {
-        invoke!(self, cmd::FINISH, Some(cmd::FINISH_RESPONSE), |w| {}, |data| {
-            let fields = tlv(require(data)?.r#struct())?;
-            let slot = if tlv(tlv(fields.ctx(0))?.u8())? == 0 {
-                Slot::Ota0
-            } else {
-                Slot::Ota1
-            };
-            Ok((slot, tlv(tlv(fields.ctx(1))?.utf8())?.to_owned()))
-        })
+        invoke!(
+            self,
+            cmd::FINISH,
+            Some(cmd::FINISH_RESPONSE),
+            |w| {},
+            |data| {
+                let fields = tlv(require(data)?.r#struct())?;
+                let slot = if tlv(tlv(fields.ctx(0))?.u8())? == 0 {
+                    Slot::Ota0
+                } else {
+                    Slot::Ota1
+                };
+                Ok((slot, tlv(tlv(fields.ctx(1))?.utf8())?.to_owned()))
+            }
+        )
     }
 
     pub async fn abort(&self) -> Result<()> {
@@ -330,8 +343,13 @@ impl<'a, C: Crypto> Client<'a, C> {
             .await
             .map_err(|e| anyhow!("OpenBasicCommissioningWindow: {e:?}"))?;
         let result = match chunk.response().map_err(|e| anyhow!("{e:?}"))? {
-            Some(response) => match response.statuses(ADMIN_COMMISSIONING, OPEN_BASIC_WINDOW).next() {
-                Some((_, status)) => status.map_err(|e| anyhow!("device refused to open a window: {e:?}")),
+            Some(response) => match response
+                .statuses(ADMIN_COMMISSIONING, OPEN_BASIC_WINDOW)
+                .next()
+            {
+                Some((_, status)) => {
+                    status.map_err(|e| anyhow!("device refused to open a window: {e:?}"))
+                }
                 None => Ok(()),
             },
             None => Ok(()),

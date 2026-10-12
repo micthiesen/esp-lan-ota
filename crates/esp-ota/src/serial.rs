@@ -40,7 +40,10 @@ pub fn default_port() -> Result<String> {
     match ports.as_slice() {
         [one] => Ok(one.clone()),
         [] => bail!("no USB serial port found; pass --serial or --code"),
-        many => bail!("several USB serial ports ({}); pass --serial", many.join(", ")),
+        many => bail!(
+            "several USB serial ports ({}); pass --serial",
+            many.join(", ")
+        ),
     }
 }
 
