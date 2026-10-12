@@ -232,7 +232,7 @@ pub(crate) mod tests {
             &mut flash,
             &[
                 entry(TYPE_DATA, SUBTYPE_OTADATA, 0xD000, 0x2000, "otadata"),
-                entry(TYPE_APP, SUBTYPE_FACTORY, 0x8000_0, 0x1000, "factory"),
+                entry(TYPE_APP, SUBTYPE_FACTORY, 0x0008_0000, 0x1000, "factory"),
                 entry(TYPE_APP, SUBTYPE_OTA_0, 0x10000, 0x8000, "ota_0"),
                 entry(TYPE_APP, SUBTYPE_OTA_1, 0x18000, 0x8000, "ota_1"),
             ],
