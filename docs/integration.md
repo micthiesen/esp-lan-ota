@@ -97,6 +97,10 @@ let ota = &*OTA.init(OtaService::new(ota));
 state. Uploads use no further RAM: chunks are written straight from Matter's
 receive buffer.
 
+If `Ota::start` fails, keep the cluster declared with
+`OtaCluster::unavailable(dataver)` so the data model is the same; it refuses
+every command.
+
 Add the cluster to the app's main endpoint (not endpoint 0, which
 rs-matter-stack handles itself) and chain the handler:
 

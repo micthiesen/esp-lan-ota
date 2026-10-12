@@ -294,7 +294,7 @@ impl AttrChangeNotifier for NoNotify {
 
 /// The cluster handler.
 pub struct OtaCluster<'a, F> {
-    service: &'a OtaService<F>,
+    service: Option<&'a OtaService<F>>,
     dataver: Dataver,
 }
 
@@ -318,12 +318,25 @@ impl<'a, F: NorFlash> OtaCluster<'a, F> {
     );
 
     pub const fn new(service: &'a OtaService<F>, dataver: Dataver) -> Self {
-        Self { service, dataver }
+        Self {
+            service: Some(service),
+            dataver,
+        }
     }
 
-    fn reply_status(&self, reply: impl InvokeReply) -> Result<(), Error> {
-        let status = self.service.status();
-        let last_error = *self.service.last_error.borrow();
+    /// The cluster for a device where [`Ota::start`] failed (for example the
+    /// partition table is not an OTA layout). It stays declared, so the data
+    /// model does not change shape, and refuses every command.
+    pub const fn unavailable(dataver: Dataver) -> Self {
+        Self {
+            service: None,
+            dataver,
+        }
+    }
+
+    fn reply_status(&self, service: &OtaService<F>, reply: impl InvokeReply) -> Result<(), Error> {
+        let status = service.status();
+        let last_error = *service.last_error.borrow();
         let staged_version = status.staged.map_or(Name::EMPTY, |staged| staged.version);
         let (len, next) = status.upload.unwrap_or((0, 0));
         reply_struct!(reply.with_command(cmd::STATUS_RESPONSE)?, |w| {
@@ -379,9 +392,12 @@ impl<F: NorFlash> Handler for OtaCluster<'_, F> {
     }
 
     fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
+        let Some(service) = self.service else {
+            return Err(ErrorCode::InvalidAction.into());
+        };
         let data = ctx.data();
         match ctx.cmd().cmd_id {
-            cmd::STATUS => self.reply_status(reply),
+            cmd::STATUS => self.reply_status(service, reply),
             cmd::BEGIN => {
                 let fields = data.r#struct()?;
                 let len = fields.ctx(0)?.u32()?;
@@ -390,10 +406,10 @@ impl<F: NorFlash> Handler for OtaCluster<'_, F> {
                     .octets()?
                     .try_into()
                     .map_err(|_| ErrorCode::ConstraintError)?;
-                let result = self.service.ota.borrow_mut().begin(len, sha);
-                let next = self.service.record(result)?;
+                let result = service.ota.borrow_mut().begin(len, sha);
+                let next = service.record(result)?;
                 if next == 0 {
-                    self.service.started.notify();
+                    service.started.notify();
                 }
                 reply_struct!(reply.with_command(cmd::BEGIN_RESPONSE)?, |w| {
                     w.u32(&TLVTag::Context(0), next)?;
@@ -404,20 +420,20 @@ impl<F: NorFlash> Handler for OtaCluster<'_, F> {
                 let fields = data.r#struct()?;
                 let offset = fields.ctx(0)?.u32()?;
                 let chunk = fields.ctx(1)?.octets()?;
-                let result = self.service.ota.borrow_mut().write_chunk(offset, chunk);
-                self.service.record(result)
+                let result = service.ota.borrow_mut().write_chunk(offset, chunk);
+                service.record(result)
             }
             cmd::FINISH => {
-                let result = self.service.ota.borrow_mut().finish();
-                let staged = self.service.record(result)?;
-                self.service.reboot.notify();
+                let result = service.ota.borrow_mut().finish();
+                let staged = service.record(result)?;
+                service.reboot.notify();
                 reply_struct!(reply.with_command(cmd::FINISH_RESPONSE)?, |w| {
                     w.u8(&TLVTag::Context(0), staged.slot.index() as u8)?;
                     w.utf8(&TLVTag::Context(1), staged.version.as_str())?;
                 })
             }
             cmd::ABORT => {
-                self.service.ota.borrow_mut().abort();
+                service.ota.borrow_mut().abort();
                 Ok(())
             }
             _ => Err(ErrorCode::CommandNotFound.into()),

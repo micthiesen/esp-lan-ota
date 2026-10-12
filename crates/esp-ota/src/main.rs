@@ -63,7 +63,9 @@ enum Command {
         #[arg(long = "espflash-arg", allow_hyphen_values = true)]
         espflash_args: Vec<String>,
         /// Seconds to wait for the new image to report itself confirmed.
-        #[arg(long, default_value_t = 300)]
+        /// Longer than a typical device rollback deadline (300 s), so a late
+        /// confirmation is seen and a rollback is reported as such.
+        #[arg(long, default_value_t = 420)]
         confirm_timeout: u64,
         /// Return after staging, without waiting for reboot and confirmation.
         #[arg(long)]
