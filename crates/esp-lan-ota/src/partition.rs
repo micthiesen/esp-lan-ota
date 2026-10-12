@@ -20,6 +20,7 @@ const TYPE_DATA: u8 = 0x01;
 const SUBTYPE_OTA_0: u8 = 0x10;
 const SUBTYPE_OTA_1: u8 = 0x11;
 const SUBTYPE_OTADATA: u8 = 0x00;
+const SUBTYPE_FACTORY: u8 = 0x00;
 
 /// The partitions esp-lan-ota uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +52,9 @@ impl Layout {
         };
         let mut otadata = None;
         let mut slots = [None; 2];
+        let mut others = [None::<Partition>; 16];
+        let mut other_count = 0;
+        let mut factory = false;
         let mut raw = [0u8; ENTRY_LEN as usize];
         for index in 0..TABLE_MAX_LEN / ENTRY_LEN {
             table.read(flash, index * ENTRY_LEN, &mut raw)?;
@@ -67,17 +71,37 @@ impl Layout {
                 (TYPE_DATA, SUBTYPE_OTADATA) => otadata = Some(partition),
                 (TYPE_APP, SUBTYPE_OTA_0) => slots[0] = Some(partition),
                 (TYPE_APP, SUBTYPE_OTA_1) => slots[1] = Some(partition),
-                _ => {}
+                (TYPE_APP, SUBTYPE_FACTORY) => factory = true,
+                _ => {
+                    if let Some(free) = others.get_mut(other_count) {
+                        *free = Some(partition);
+                        other_count += 1;
+                    }
+                }
             }
         }
         let (Some(otadata), [Some(ota_0), Some(ota_1)]) = (otadata, slots) else {
             return Err(LayoutError::Missing);
         };
+        // With a factory app the bootloader falls back to it rather than to
+        // ota_0, which breaks the USB-flash and rollback assumptions.
+        if factory {
+            return Err(LayoutError::Invalid);
+        }
         let layout = Layout {
             otadata,
             slots: [ota_0, ota_1],
         };
         layout.validate()?;
+        // Never let a write to otadata or a slot reach nvs or anything else.
+        for other in others.iter().flatten() {
+            for ours in [layout.otadata, layout.slots[0], layout.slots[1]] {
+                let other_end = other.offset.saturating_add(other.len);
+                if ours.offset < other_end && other.offset < ours.offset + ours.len {
+                    return Err(LayoutError::Invalid);
+                }
+            }
+        }
         Ok(layout)
     }
 
@@ -192,6 +216,39 @@ pub(crate) mod tests {
         for (i, raw) in entries.iter().enumerate() {
             flash.data[at + i * 32..at + i * 32 + 32].copy_from_slice(raw);
         }
+        assert_eq!(Layout::read(&mut flash), Err(LayoutError::Invalid));
+    }
+
+    #[test]
+    fn rejects_factory_apps_and_overlap_with_nvs() {
+        let at = TABLE_OFFSET as usize;
+        let write = |flash: &mut MockFlash, entries: &[[u8; 32]]| {
+            for (i, raw) in entries.iter().enumerate() {
+                flash.data[at + i * 32..at + i * 32 + 32].copy_from_slice(raw);
+            }
+        };
+        let mut flash = MockFlash::new();
+        write(
+            &mut flash,
+            &[
+                entry(TYPE_DATA, SUBTYPE_OTADATA, 0xD000, 0x2000, "otadata"),
+                entry(TYPE_APP, SUBTYPE_FACTORY, 0x8000_0, 0x1000, "factory"),
+                entry(TYPE_APP, SUBTYPE_OTA_0, 0x10000, 0x8000, "ota_0"),
+                entry(TYPE_APP, SUBTYPE_OTA_1, 0x18000, 0x8000, "ota_1"),
+            ],
+        );
+        assert_eq!(Layout::read(&mut flash), Err(LayoutError::Invalid));
+
+        let mut flash = MockFlash::new();
+        write(
+            &mut flash,
+            &[
+                entry(TYPE_DATA, 0x02, 0xC000, 0x2000, "nvs"),
+                entry(TYPE_DATA, SUBTYPE_OTADATA, 0xD000, 0x2000, "otadata"),
+                entry(TYPE_APP, SUBTYPE_OTA_0, 0x10000, 0x8000, "ota_0"),
+                entry(TYPE_APP, SUBTYPE_OTA_1, 0x18000, 0x8000, "ota_1"),
+            ],
+        );
         assert_eq!(Layout::read(&mut flash), Err(LayoutError::Invalid));
     }
 

@@ -33,7 +33,9 @@ Use `partitions/<size>mb.csv` from this repo, or add `otadata` and two equal
   fabrics live there.
 
 Each slot must hold the image with room to grow. Check
-`espflash save-image` output against the slot size.
+`espflash save-image` output against the slot size. For tables larger than
+4 MiB pass `--flash-size` (for example `8mb`) to `espflash flash` and
+`espflash save-image`.
 
 ## 3. Bootloader
 
@@ -144,7 +146,10 @@ async {
     if ota.is_unconfirmed() {
         match select(app_healthy(), Timer::after_secs(300)).await {
             Either::First(()) => { ota.confirm()?; }
-            Either::Second(()) => esp_hal::system::software_reset(), // roll back
+            // Roll back, but only if the bootloader can: otherwise the reset
+            // just reboots this image and the device loops.
+            Either::Second(()) if ota.can_roll_back() => esp_hal::system::software_reset(),
+            Either::Second(()) => { app_healthy().await; ota.confirm()?; }
         }
     }
 }

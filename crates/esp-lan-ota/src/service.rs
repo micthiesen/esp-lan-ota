@@ -168,6 +168,14 @@ impl<F: NorFlash> Ota<F> {
         Ok(changed)
     }
 
+    /// True when resetting an unconfirmed image returns to the previous slot.
+    /// With a bootloader that ignores image states (`Rollback::Unsupported`)
+    /// a health-timeout reset would only reboot the same image, forever; skip
+    /// it then and keep running.
+    pub fn can_roll_back(&self) -> bool {
+        self.boot.rollback == Rollback::Supported
+    }
+
     /// True while the running image still needs [`Self::confirm`].
     pub fn is_unconfirmed(&self) -> bool {
         self.otadata

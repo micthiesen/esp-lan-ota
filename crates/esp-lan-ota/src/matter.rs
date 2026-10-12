@@ -179,6 +179,11 @@ impl<F: NorFlash> OtaService<F> {
         self.ota.borrow().is_unconfirmed()
     }
 
+    /// See [`Ota::can_roll_back`].
+    pub fn can_roll_back(&self) -> bool {
+        self.ota.borrow().can_roll_back()
+    }
+
     /// Returns once an update has been staged and its `Finish` response sent.
     /// The caller then performs a software reset.
     pub async fn wait_reboot(&self) {
