@@ -1,0 +1,6 @@
+# Matches espflash's bundled bootloaders (ESP-IDF release/v5.5 defaults) plus
+# rollback: a `New` image becomes `PendingVerify` on first boot, and a
+# `PendingVerify` image found at the next boot is marked `Aborted` so the
+# previous slot starts.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_PARTITION_TABLE_CUSTOM=n

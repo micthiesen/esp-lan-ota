@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: riscv32imc-unknown-none-elf, riscv32imac-unknown-none-elf
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libudev-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: sh scripts/check.sh
+
+  xtensa-s3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.6
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: false
+      - run: cargo +esp check -p esp-lan-ota --features rs-matter-0-2 --target xtensa-esp32s3-none-elf -Zbuild-std=core

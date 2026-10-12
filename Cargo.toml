@@ -1,0 +1,14 @@
+# The device crate (`no_std`, host-tested) and the `esp-ota` host CLI.
+[workspace]
+resolver = "2"
+members = ["crates/esp-lan-ota", "crates/esp-ota"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/micthiesen/esp-lan-ota"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

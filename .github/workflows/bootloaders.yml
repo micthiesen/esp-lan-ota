@@ -1,0 +1,36 @@
+name: bootloaders
+
+# Builds the rollback-enabled ESP-IDF bootloaders. Run manually; the job
+# uploads the binaries, which are then committed under bootloaders/.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "bootloaders/project/**"
+      - ".github/workflows/bootloaders.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.5
+    strategy:
+      fail-fast: false
+      matrix:
+        chip: [esp32c3, esp32c6, esp32h2, esp32s3]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build bootloader
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          cd bootloaders/project
+          idf.py set-target ${{ matrix.chip }}
+          idf.py bootloader
+          mkdir -p ../out
+          cp build/bootloader/bootloader.bin ../out/${{ matrix.chip }}-bootloader.bin
+          grep -E "^CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" sdkconfig
+          git -C $IDF_PATH describe --tags > ../out/${{ matrix.chip }}-idf-version.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.chip }}-bootloader
+          path: bootloaders/out/

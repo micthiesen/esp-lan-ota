@@ -1,0 +1,8 @@
+# esp-lan-ota layout for 16 MiB flash. Two equal OTA slots, no factory app.
+# nvs matches the common Matter layout; keep an existing nvs offset/size when
+# migrating so pairing survives. App partitions are 64 KiB aligned (C6/H2 MMU).
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x10000,
+otadata,  data, ota,     0x19000,  0x2000,
+ota_0,    app,  ota_0,   0x20000,  0x7F0000,
+ota_1,    app,  ota_1,   0x810000, 0x7F0000,
