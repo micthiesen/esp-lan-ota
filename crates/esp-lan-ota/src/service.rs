@@ -50,10 +50,11 @@ pub struct BootInfo {
     /// The OTA state of the running image when this boot started.
     pub state: Option<ImageState>,
     pub rollback: Rollback,
-    /// This is the first boot after a USB flash. The app opens a Matter
-    /// commissioning window so `esp-ota enroll` can add its fabric; physical
-    /// USB access is the consent. Later boots, including OTA updates, report
-    /// `false`.
+    /// This boot follows a USB flash and enrollment has not ended. The app
+    /// opens a Matter commissioning window so `esp-ota enroll` can add its
+    /// fabric; physical USB access is the consent. It ends after the window's
+    /// 15 minutes or the first upload ([`Ota::end_enrollment`]); OTA boots
+    /// never report it.
     pub enrollment_window: bool,
 }
 
@@ -99,11 +100,11 @@ pub struct Ota<F> {
     boot: BootInfo,
     upload: Option<Upload>,
     staged: Option<Staged>,
+    accepting: bool,
 }
 
 impl<F: NorFlash> Ota<F> {
-    /// Reads the partition table and boot records, and consumes the
-    /// first-boot-after-USB marker.
+    /// Reads the partition table and boot records.
     ///
     /// `booted_offset` is the flash offset of the running app partition, from
     /// `esp_bootloader_esp_idf::partitions::PartitionTable::booted_partition`.
@@ -112,15 +113,14 @@ impl<F: NorFlash> Ota<F> {
         let booted = layout
             .slot_at(booted_offset)
             .ok_or(StartError::NotOtaSlot)?;
-        let mut otadata = OtaData::read(&mut flash, &layout.otadata)?;
+        let otadata = OtaData::read(&mut flash, &layout.otadata)?;
         let state = otadata.state_of(booted);
         let rollback = match state {
             Some(ImageState::PendingVerify) => Rollback::Supported,
             Some(ImageState::New) => Rollback::Unsupported,
             _ => Rollback::Unknown,
         };
-        let enrollment_window = otadata.is_fresh_usb_flash(booted);
-        let mut ota = Self {
+        Ok(Self {
             flash,
             layout,
             identity,
@@ -129,17 +129,12 @@ impl<F: NorFlash> Ota<F> {
                 booted,
                 state,
                 rollback,
-                enrollment_window,
+                enrollment_window: otadata.is_fresh_usb_flash(booted),
             },
             upload: None,
             staged: None,
-        };
-        if enrollment_window {
-            ota.write(otadata.plan_mark(booted))?;
-            otadata = ota.otadata;
-            debug_assert!(!otadata.is_fresh_usb_flash(booted));
-        }
-        Ok(ota)
+            accepting: true,
+        })
     }
 
     pub fn boot_info(&self) -> BootInfo {
@@ -148,6 +143,18 @@ impl<F: NorFlash> Ota<F> {
 
     pub fn identity(&self) -> Identity {
         self.identity
+    }
+
+    /// Ends the after-USB-flash enrollment period, so later boots open no
+    /// window. Called when the window has run its course and when the first
+    /// upload starts. Until then a reset (crash, brownout, serial monitor)
+    /// reopens the window, so enrollment survives one. Returns whether
+    /// anything was written.
+    pub fn end_enrollment(&mut self) -> Result<bool, FlashError> {
+        let plan = self.otadata.plan_mark(self.boot.booted);
+        let changed = plan.updates().next().is_some();
+        self.write(plan)?;
+        Ok(changed)
     }
 
     /// Marks the running image good. Call once the app's own health checks
@@ -168,6 +175,18 @@ impl<F: NorFlash> Ota<F> {
             .is_some_and(ImageState::is_unconfirmed)
     }
 
+    /// Lets the app hold off new uploads (for example until a motor has
+    /// stopped). `begin` reports [`UploadError::Busy`] while false; the host
+    /// retries. An upload already in progress continues.
+    pub fn set_accepting(&mut self, accepting: bool) {
+        self.accepting = accepting;
+    }
+
+    /// True while an upload is in progress or staged.
+    pub fn is_updating(&self) -> bool {
+        self.upload.is_some() || self.staged.is_some()
+    }
+
     /// Starts an upload, or resumes the one with the same length and hash.
     /// Returns the offset to send next.
     pub fn begin(&mut self, len: u32, sha256: &[u8; 32]) -> Result<u32, UploadError> {
@@ -182,8 +201,16 @@ impl<F: NorFlash> Ota<F> {
                 return Ok(upload.next());
             }
         }
+        if !self.accepting {
+            return Err(UploadError::Busy);
+        }
         let target = self.boot.booted.other();
-        self.upload = Some(Upload::new(target, self.layout.slot(target), len, *sha256)?);
+        let upload = Upload::new(target, self.layout.slot(target), len, *sha256)?;
+        // Before erasing the other slot, make sure the record the bootloader
+        // follows describes the running image, not the slot being rewritten.
+        self.write(self.otadata.plan_seed(self.boot.booted))?;
+        self.end_enrollment()?;
+        self.upload = Some(upload);
         Ok(0)
     }
 
@@ -193,14 +220,19 @@ impl<F: NorFlash> Ota<F> {
             project: self.identity.project,
         };
         let upload = self.upload.as_mut().ok_or(UploadError::NoUpload)?;
-        upload.write(&mut self.flash, &expect, offset, data)
+        let result = upload.write(&mut self.flash, &expect, offset, data);
+        self.drop_if_unrecoverable(&result);
+        result
     }
 
     /// Verifies the whole image and selects it for the next boot. The caller
     /// reboots afterwards.
     pub fn finish(&mut self) -> Result<Staged, UploadError> {
         let upload = self.upload.as_ref().ok_or(UploadError::NoUpload)?;
-        upload.finish(&mut self.flash)?;
+        let verified = upload.finish(&mut self.flash);
+        self.drop_if_unrecoverable(&verified);
+        verified?;
+        let upload = self.upload.as_ref().ok_or(UploadError::NoUpload)?;
         let staged = Staged {
             slot: upload.slot(),
             version: upload.version(),
@@ -213,6 +245,17 @@ impl<F: NorFlash> Ota<F> {
         self.upload = None;
         self.staged = Some(staged);
         Ok(staged)
+    }
+
+    /// A flash error or a bad hash means the slot contents are unknown; the
+    /// next `begin` must start over (and so erase again) instead of resuming.
+    fn drop_if_unrecoverable<T>(&mut self, result: &Result<T, UploadError>) {
+        if matches!(
+            result,
+            Err(UploadError::Flash(_) | UploadError::Conflict | UploadError::HashMismatch)
+        ) {
+            self.upload = None;
+        }
     }
 
     /// Drops an upload in progress. Nothing that boots has changed.
@@ -235,14 +278,15 @@ impl<F: NorFlash> Ota<F> {
         }
     }
 
-    /// Writes a plan and re-reads the records from flash.
+    /// Writes a plan, then re-reads the records from flash whether or not
+    /// the write succeeded, so later plans never start from a stale copy.
     fn write(&mut self, plan: Plan) -> Result<(), FlashError> {
         if plan.updates().next().is_none() {
             return Ok(());
         }
-        write_plan(&mut self.flash, &self.layout.otadata, &plan)?;
+        let written = write_plan(&mut self.flash, &self.layout.otadata, &plan);
         self.otadata = OtaData::read(&mut self.flash, &self.layout.otadata)?;
-        Ok(())
+        written
     }
 }
 
@@ -316,11 +360,17 @@ mod tests {
         let mut flash = MockFlash::new();
         let layout = write_test_table(&mut flash);
 
-        // First boot after USB flash: enrollment window, marked once.
+        // First boot after USB flash: enrollment window, which survives a
+        // reset until it is ended.
         let booted = reboot(&mut flash, &layout);
         let ota = Ota::start(&mut flash, booted, IDENTITY).unwrap();
         assert!(ota.boot_info().enrollment_window);
         assert_eq!(ota.boot_info().booted, Slot::Ota0);
+        let booted = reboot(&mut flash, &layout);
+        let mut ota = Ota::start(&mut flash, booted, IDENTITY).unwrap();
+        assert!(ota.boot_info().enrollment_window, "reopens after a reset");
+        assert!(ota.end_enrollment().unwrap());
+        assert!(!ota.end_enrollment().unwrap());
         let booted = reboot(&mut flash, &layout);
         let mut ota = Ota::start(&mut flash, booted, IDENTITY).unwrap();
         assert!(!ota.boot_info().enrollment_window);
@@ -384,6 +434,93 @@ mod tests {
             ota.write_chunk(0, &image[..1024]),
             Err(UploadError::NoUpload)
         );
+    }
+
+    #[test]
+    fn first_upload_ends_enrollment() {
+        let mut flash = MockFlash::new();
+        let layout = write_test_table(&mut flash);
+        let booted = reboot(&mut flash, &layout);
+        let mut ota = Ota::start(&mut flash, booted, IDENTITY).unwrap();
+        assert!(ota.boot_info().enrollment_window);
+        ota.begin(8192, &[0; 32]).unwrap();
+        let booted = reboot(&mut flash, &layout);
+        let ota = Ota::start(&mut flash, booted, IDENTITY).unwrap();
+        assert!(!ota.boot_info().enrollment_window);
+    }
+
+    #[test]
+    fn busy_gate_holds_new_uploads_but_not_resumes() {
+        let mut flash = MockFlash::new();
+        let layout = write_test_table(&mut flash);
+        let booted = reboot(&mut flash, &layout);
+        let mut ota = Ota::start(&mut flash, booted, IDENTITY).unwrap();
+        ota.set_accepting(false);
+        assert_eq!(ota.begin(8192, &[1; 32]), Err(UploadError::Busy));
+        assert!(!ota.is_updating());
+        ota.set_accepting(true);
+        assert_eq!(ota.begin(8192, &[1; 32]), Ok(0));
+        ota.set_accepting(false);
+        assert_eq!(ota.begin(8192, &[1; 32]), Ok(0), "resume is allowed");
+        assert!(ota.is_updating());
+    }
+
+    #[test]
+    fn unrecoverable_errors_restart_the_upload() {
+        let mut flash = MockFlash::new();
+        let layout = write_test_table(&mut flash);
+        let booted = reboot(&mut flash, &layout);
+        let mut ota = Ota::start(&mut flash, booted, IDENTITY).unwrap();
+        let image = test_image(Chip::Esp32c6, "demo", "2", 8192);
+
+        // Announced hash wrong: finish fails and the next begin starts at 0.
+        ota.begin(8192, &[9; 32]).unwrap();
+        for offset in (0..8192).step_by(1024) {
+            ota.write_chunk(offset as u32, &image[offset..offset + 1024])
+                .unwrap();
+        }
+        assert_eq!(ota.finish(), Err(UploadError::HashMismatch));
+        assert_eq!(ota.begin(8192, &[9; 32]).unwrap(), 0);
+
+        // A resend that differs from flash also restarts.
+        let sha: [u8; 32] = Sha256::digest(image).into();
+        ota.begin(8192, &sha).unwrap();
+        ota.write_chunk(0, &image[..1024]).unwrap();
+        let mut changed = [0u8; 1024];
+        changed.copy_from_slice(&image[..1024]);
+        changed[200] ^= 1;
+        assert_eq!(ota.write_chunk(0, &changed), Err(UploadError::Conflict));
+        assert_eq!(ota.begin(8192, &sha).unwrap(), 0);
+    }
+
+    #[test]
+    fn failed_activation_never_rewrites_the_active_record() {
+        let mut flash = MockFlash::new();
+        let layout = write_test_table(&mut flash);
+        // Erased otadata: activation needs a seed write and a New write.
+        let mut ota = Ota::start(&mut flash, layout.slot(Slot::Ota0).offset, IDENTITY).unwrap();
+        let image = test_image(Chip::Esp32c6, "demo", "2", 8192);
+        let sha: [u8; 32] = Sha256::digest(image).into();
+        ota.begin(8192, &sha).unwrap();
+        for offset in (0..8192).step_by(1024) {
+            ota.write_chunk(offset as u32, &image[offset..offset + 1024])
+                .unwrap();
+        }
+        // begin() already seeded ota_0; fail the New record.
+        let active_before = OtaData::read(&mut *ota_flash(&mut ota), &layout.otadata)
+            .unwrap()
+            .active()
+            .unwrap();
+        ota_flash(&mut ota).fail_after_bytes = Some(0);
+        assert!(matches!(ota.finish(), Err(UploadError::Flash(_))));
+        ota_flash(&mut ota).fail_after_bytes = None;
+        let data = OtaData::read(&mut *ota_flash(&mut ota), &layout.otadata).unwrap();
+        assert_eq!(data.active(), Some(active_before));
+        assert_eq!(data.selected_slot(), Slot::Ota0);
+    }
+
+    fn ota_flash<'a>(ota: &'a mut Ota<&mut MockFlash>) -> &'a mut MockFlash {
+        &mut *ota.flash
     }
 
     #[test]

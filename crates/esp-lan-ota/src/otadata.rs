@@ -288,7 +288,7 @@ impl OtaData {
     }
 
     fn next_seq(&self, slot: Slot) -> u32 {
-        let mut seq = self.max_seq() + 1;
+        let mut seq = self.max_seq().saturating_add(1);
         if Slot::for_seq(seq) != slot {
             seq += 1;
         }
@@ -316,6 +316,19 @@ impl OtaData {
         self.entries[sector] = entry;
         let free = plan.updates.iter_mut().find(|u| u.is_none());
         *free.expect("a plan holds at most two updates") = Some(update);
+    }
+
+    /// A `Valid` record for the running slot when the active record points
+    /// elsewhere (the bootloader fell back from a bad image), so rewriting the
+    /// other slot never touches the image the bootloader would start.
+    pub fn plan_seed(&self, booted: Slot) -> Plan {
+        let mut next = *self;
+        let mut plan = Plan::default();
+        if next.active().map(|index| next.entries[index].slot()) != Some(booted) {
+            let seed = Entry::new(next.next_seq(booted), ImageState::Valid);
+            next.push(&mut plan, seed);
+        }
+        plan
     }
 
     /// Selects `target` for the next boot as a `New` image.
@@ -599,6 +612,24 @@ mod tests {
         let plan = data.plan_confirm(Slot::Ota1);
         apply_plan(&mut data, plan);
         assert_eq!(data.state_of(Slot::Ota1), Some(ImageState::Valid));
+    }
+
+    #[test]
+    fn seed_points_back_at_the_running_slot() {
+        let data = OtaData {
+            entries: [
+                Entry::new(1, ImageState::Valid),
+                Entry::new(2, ImageState::Valid),
+            ],
+        };
+        assert_eq!(data.selected_slot(), Slot::Ota1);
+        let mut seeded = data;
+        let plan = seeded.plan_seed(Slot::Ota0);
+        assert_eq!(plan.updates().count(), 1);
+        apply_plan(&mut seeded, plan);
+        assert_eq!(seeded.selected_slot(), Slot::Ota0);
+        assert_eq!(seeded.state_of(Slot::Ota0), Some(ImageState::Valid));
+        assert!(seeded.plan_seed(Slot::Ota0).updates().next().is_none());
     }
 
     #[test]

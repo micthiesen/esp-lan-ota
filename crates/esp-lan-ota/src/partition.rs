@@ -86,10 +86,16 @@ impl Layout {
             return Err(LayoutError::Invalid);
         }
         let all = [self.otadata, self.slots[0], self.slots[1]];
-        for (i, a) in all.iter().enumerate() {
-            if a.offset % SECTOR != 0 || a.len % SECTOR != 0 || a.len == 0 {
+        for a in &all {
+            if !a.offset.is_multiple_of(SECTOR)
+                || !a.len.is_multiple_of(SECTOR)
+                || a.len == 0
+                || a.offset.checked_add(a.len).is_none()
+            {
                 return Err(LayoutError::Invalid);
             }
+        }
+        for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 if a.offset < b.offset + b.len && b.offset < a.offset + a.len {
                     return Err(LayoutError::Invalid);

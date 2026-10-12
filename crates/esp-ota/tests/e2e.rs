@@ -8,7 +8,7 @@ use core::pin::pin;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::rc::Rc;
 
-use embassy_futures::select::{select, select3, Either};
+use embassy_futures::select::select3;
 use embedded_storage::nor_flash::{
     ErrorType, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
 };
@@ -314,11 +314,22 @@ async fn run() {
         Ok(())
     });
 
+    // The app holds off uploads at first (as stillair does while its fan
+    // spins down); the host must wait for it rather than fail.
+    service.set_accepting(false);
+    let release = async {
+        async_io::Timer::after(std::time::Duration::from_secs(3)).await;
+        service.set_accepting(true);
+        core::future::pending::<()>().await
+    };
+
     let mut device = pin!(device);
     let mut host = pin!(host);
-    match select(&mut device, &mut host).await {
-        Either::First(result) => panic!("device stopped: {result:?}"),
-        Either::Second(result) => result.unwrap(),
+    let mut release = pin!(release);
+    match select3(&mut device, &mut host, &mut release).await {
+        embassy_futures::select::Either3::First(result) => panic!("device stopped: {result:?}"),
+        embassy_futures::select::Either3::Second(result) => result.unwrap(),
+        embassy_futures::select::Either3::Third(()) => unreachable!(),
     }
 
     // The slot holds exactly the image and otadata selects it as New.

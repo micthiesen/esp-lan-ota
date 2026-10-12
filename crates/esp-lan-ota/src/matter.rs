@@ -95,6 +95,7 @@ pub fn error_code(error: &UploadError) -> u8 {
         UploadError::Unconfirmed => 12,
         UploadError::RebootPending => 13,
         UploadError::Flash(_) => 14,
+        UploadError::Busy => 15,
     }
 }
 
@@ -116,6 +117,7 @@ pub fn error_text(code: u8) -> &'static str {
         12 => "running image not yet confirmed",
         13 => "update staged; reboot pending",
         14 => "flash error",
+        15 => "device busy; retry",
         _ => "unknown",
     }
 }
@@ -125,6 +127,7 @@ pub struct OtaService<F> {
     ota: RefCell<Ota<F>>,
     last_error: RefCell<u8>,
     reboot: Notification,
+    started: Notification,
 }
 
 impl<F: NorFlash> OtaService<F> {
@@ -133,7 +136,30 @@ impl<F: NorFlash> OtaService<F> {
             ota: RefCell::new(ota),
             last_error: RefCell::new(0),
             reboot: Notification::new(),
+            started: Notification::new(),
         }
+    }
+
+    /// See [`Ota::set_accepting`]: hold off new uploads while the app is not
+    /// ready to reboot (the host retries `Begin` for up to two minutes).
+    pub fn set_accepting(&self, accepting: bool) {
+        self.ota.borrow_mut().set_accepting(accepting);
+    }
+
+    /// True while an upload is in progress or staged.
+    pub fn is_updating(&self) -> bool {
+        self.ota.borrow().is_updating()
+    }
+
+    /// Returns when an upload starts (a fresh `Begin`), so the app can bring
+    /// hardware to a state that is safe across the coming reboot.
+    pub async fn wait_upload_started(&self) {
+        self.started.wait().await;
+    }
+
+    /// See [`Ota::end_enrollment`].
+    pub fn end_enrollment(&self) -> Result<bool, FlashError> {
+        self.ota.borrow_mut().end_enrollment()
     }
 
     pub fn boot_info(&self) -> BootInfo {
@@ -181,6 +207,7 @@ impl<F: NorFlash> OtaService<F> {
                     | UploadError::RebootPending
                     | UploadError::Incomplete => ErrorCode::InvalidAction,
                     UploadError::Flash(_) => ErrorCode::Failure,
+                    UploadError::Busy => ErrorCode::Busy,
                     _ => ErrorCode::ConstraintError,
                 }
                 .into())
@@ -207,11 +234,16 @@ impl core::fmt::Display for Enrollment {
     }
 }
 
-/// Opens a 15-minute basic commissioning window when this is the first boot
-/// after a USB flash, so `esp-ota enroll` can add its fabric. Returns the
-/// setup data to print on the USB console (see [`announce_enrollment`]).
-/// Does nothing on other boots. A window that is already open (an
-/// uncommissioned device opens one itself) is reused.
+/// Opens a 15-minute basic commissioning window when this boot follows a USB
+/// flash, so `esp-ota enroll` can add its fabric. Returns the setup data to
+/// print on the USB console (see [`announce_enrollment`]). Does nothing on
+/// other boots. A window that is already open (an uncommissioned device opens
+/// one itself) is reused: rs-matter reports `Busy` for that, and
+/// `InvalidAction` when the failsafe of an ongoing commissioning holds it.
+///
+/// The window uses the device's own setup passcode, so anyone on the LAN who
+/// knows it could commission the device while the window is open. Give each
+/// device a random passcode rather than the public test passcode.
 pub fn open_enrollment_window<C: rs_matter::crypto::Crypto>(
     boot: &BootInfo,
     matter: &Matter<'_>,
@@ -235,13 +267,20 @@ pub fn open_enrollment_window<C: rs_matter::crypto::Crypto>(
 
 /// Calls `print` with the enrollment line every 5 seconds for the 15
 /// minutes the window stays open, so a host that attaches to the USB console
-/// after flashing still sees it.
-pub async fn announce_enrollment(enrollment: Enrollment, mut print: impl FnMut(&Enrollment)) {
+/// after flashing still sees it, then ends the enrollment period so later
+/// boots open no window.
+pub async fn announce_enrollment<F: NorFlash>(
+    service: &OtaService<F>,
+    enrollment: Enrollment,
+    mut print: impl FnMut(&Enrollment),
+) {
     let rounds = u64::from(MAX_COMM_WINDOW_TIMEOUT_SECS) / 5;
     for _ in 0..rounds {
         print(&enrollment);
         embassy_time::Timer::after_secs(5).await;
     }
+    // A failed write only means the next boot offers the window again.
+    let _ = service.end_enrollment();
 }
 
 struct NoNotify;
@@ -353,6 +392,9 @@ impl<F: NorFlash> Handler for OtaCluster<'_, F> {
                     .map_err(|_| ErrorCode::ConstraintError)?;
                 let result = self.service.ota.borrow_mut().begin(len, sha);
                 let next = self.service.record(result)?;
+                if next == 0 {
+                    self.service.started.notify();
+                }
                 reply_struct!(reply.with_command(cmd::BEGIN_RESPONSE)?, |w| {
                     w.u32(&TLVTag::Context(0), next)?;
                     w.u16(&TLVTag::Context(1), MAX_CHUNK as u16)?;

@@ -15,9 +15,11 @@ The crate depends only on `embedded-storage 0.3`, `sha2 0.10` and, with the
 feature, `rs-matter 0.2` and `embassy-time 0.5` (both already in the
 firmware's graph). It has no esp-* dependency and no chip feature.
 
-Keep `esp-storage`'s `critical-section` feature on (its default). Updates write
-hundreds of sectors while Wi-Fi interrupts run; without it, an interrupt that
-executes from flash during an erase crashes the chip.
+Keep `esp-storage`'s `critical-section` feature on. It is a default feature,
+so a dependency declared with `default-features = false` must list it
+explicitly. Updates write hundreds of sectors while Wi-Fi interrupts run;
+without it, an interrupt that executes from flash during an erase crashes the
+chip.
 
 ## 2. Partition table
 
@@ -63,7 +65,9 @@ use esp_lan_ota::{Chip, Identity, Name, Ota};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-// A second handle to the same flash; esp-storage serialises operations.
+// A second handle to the same flash. esp-storage's docs say a second
+// `FlashStorage::new` panics, but the code (esp-hal 10e48dd) does not check;
+// operations are serialised by its critical section.
 let mut flash = esp_storage::FlashStorage::new(unsafe { esp_hal::peripherals::FLASH::steal() });
 
 // Which slot is running (MMU lookup). The 3 KiB buffer is only needed here.
@@ -77,11 +81,14 @@ let booted = {
 };
 
 let identity = Identity {
-    chip: Chip::Esp32c3,
+    chip: Chip::Esp32c3, // the project's chip
+
     project: Name::new(ESP_APP_DESC.project_name()).unwrap(),
     version: Name::new(ESP_APP_DESC.version()).unwrap(),
 };
-let ota = Ota::start(flash, booted.unwrap(), identity)?; // Err: not an OTA layout
+// Err: not an OTA layout (for example after a bare `espflash flash`).
+// Prefer running without OTA over not running at all.
+let ota = Ota::start(flash, booted.unwrap(), identity)?;
 static OTA: StaticCell<OtaService<FlashStorage>> = StaticCell::new();
 let ota = &*OTA.init(OtaService::new(ota));
 ```
@@ -103,15 +110,20 @@ handler.chain(
 ```
 
 After the stack has loaded its persisted state, open the enrollment window
-(only does anything on the first boot after a USB flash) and print the line
-`esp-ota enroll` reads:
+(only after a USB flash) and print the line `esp-ota enroll` reads:
 
 ```rust
 if let Some(enrollment) = open_enrollment_window(&ota.boot_info(), stack.matter(), &crypto)? {
-    // run alongside the stack:
-    announce_enrollment(enrollment, |e| println!("{e}")).await;
+    // run alongside the stack; ends the enrollment period after 15 minutes
+    announce_enrollment(ota, enrollment, |e| println!("{e}")).await;
 }
 ```
+
+The enrollment period lasts until the window's 15 minutes have run or the
+first upload starts, so a reset in between (serial monitor, brownout) reopens
+the window. The window uses the device's own setup passcode: give each device
+a random passcode, not the public test passcode `20202021`, or anyone on the
+LAN can add a fabric during those 15 minutes.
 
 Run these alongside the stack:
 
@@ -135,8 +147,23 @@ async {
 ```
 
 Pick a health check that would fail on a broken build: Matter operational
-(network up, sessions served) plus the project's own peripherals verified. A
-watchdog reset before confirmation also rolls back.
+(network up, sessions served) plus the project's own peripherals currently
+working (not just "worked once"). A watchdog reset before confirmation also
+rolls back.
+
+Hardware that must be in a safe state before a reboot can hold off uploads
+and react when one starts:
+
+```rust
+ota.set_accepting(false);          // Begin answers Busy; esp-ota retries for 2 min
+ota.wait_upload_started().await;   // a fresh upload began
+ota.is_updating()                  // upload in progress or staged
+```
+
+`Finish` re-reads and hashes the whole image inside the Matter handler, which
+blocks the executor for about a second per MiB on a C3. Each 1 KiB chunk
+write, and the 4 KiB erase before every fourth chunk, also runs inline. Keep
+watchdog timeouts well above that.
 
 ## 6. Enroll and push
 

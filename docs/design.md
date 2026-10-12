@@ -12,13 +12,16 @@ so only administrators on one of the device's fabrics can update it.
 | Command | ID | Fields | Response |
 | --- | --- | --- | --- |
 | Status | 0x00 | none | 0x80: project, version, chip ID, booted slot, image state, rollback, upload length/offset, staged flag/version, last error, max chunk |
-| Begin | 0x01 | 0: length u32, 1: SHA-256 octets | 0x81: next offset u32, max chunk u16 |
+| Begin | 0x01 | 0: length u32, 1: SHA-256 octets | 0x81: next offset u32, max chunk u16; `Busy` while the app holds off uploads |
 | Write | 0x02 | 0: offset u32, 1: data octets (≤ 1024) | status |
 | Finish | 0x03 | none | 0x83: slot u8, version string |
 | Abort | 0x04 | none | status |
 
 Begin with the same length and hash resumes and returns the device's offset;
-a different image restarts. Writes must be in order at word-aligned offsets;
+a different image restarts. A flash error, a resent chunk that differs from
+flash, or a hash mismatch drops the upload, so the next Begin starts again from
+0. The host aborts on failure and, if a Finish response is lost, checks Status
+for the staged version. Writes must be in order at word-aligned offsets;
 a resent chunk is compared with flash and accepted again. Refusals carry an IM
 status, and `Status.last_error` gives the reason.
 
@@ -29,13 +32,17 @@ controller identity in `~/.config/esp-lan-ota/fabric.toml`, mode 0600) and
 commissions each device into it with the standard flow. Apple Home and other
 fabrics are untouched.
 
-A device opens a 15-minute basic commissioning window only on the first boot
-after a USB flash, and prints `esp-lan-ota enroll passcode=... discriminator=...`
-on its console. Physical USB access is the consent. It detects that boot from
-`otadata`: the USB flash erases it and the bootloader writes an unlabelled
-record, while every record this crate writes carries `esp-lan-ota` in the
-`seq_label` field. The window is consumed by writing an equivalent labelled
-record.
+A device opens a 15-minute basic commissioning window only after a USB flash,
+and prints `esp-lan-ota enroll passcode=... discriminator=...` on its console.
+Physical USB access is the consent. It detects such a boot from `otadata`: the
+USB flash erases it and the bootloader writes an unlabelled record, while every
+record this crate writes carries `esp-lan-ota` in the `seq_label` field. The
+enrollment period ends, by writing an equivalent labelled record, when the
+window's 15 minutes have run or the first upload starts; a reset before then
+reopens the window.
+
+The window uses the device's own setup passcode (rs-matter 0.2 exposes only
+the basic window publicly), so devices should use random per-device passcodes.
 
 A device that has never joined Wi-Fi is commissioned over Bluetooth (BTP) with
 Wi-Fi credentials. rs-matter 0.2 does not expose its BTP central role, so
@@ -60,7 +67,15 @@ previous selection in place:
   write a `Valid` record for it, so a failed update falls back to exactly what
   was running. Then write a `New` record for the target slot.
 - **Confirm**: write a `Valid` record for the running slot with sequence
-  `active + 2` (same slot).
+  `active + 2` (same slot). This erases the sector holding the previous
+  fallback record. Power loss during that write leaves only the running
+  image's `PendingVerify` record, which the bootloader aborts, and with no
+  bootable record it starts `ota_0`. ESP-IDF's own mark-valid has the same
+  window. The device boots a complete image either way, but possibly the older
+  one.
+- **Seed before rewriting**: `Begin` first makes the active record describe
+  the running slot. After a fallback the active record can still point at the
+  failed slot that is about to be erased.
 
 Uploads are refused while the running image is unconfirmed, because the other
 slot then holds the only known-good image.

@@ -97,6 +97,8 @@ impl Store {
         fs::create_dir_all(dir)?;
         let text = toml::to_string_pretty(self)?;
         let tmp = path.with_extension("toml.tmp");
+        // A leftover temp file would keep its old permissions.
+        let _ = fs::remove_file(&tmp);
         {
             let mut options = fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);

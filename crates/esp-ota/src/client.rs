@@ -286,8 +286,23 @@ impl<'a, C: Crypto> Client<'a, C> {
         mut progress: impl FnMut(u32, u32),
     ) -> Result<(Slot, String)> {
         let len = u32::try_from(image.len()).context("image larger than 4 GiB")?;
-        let begin = self.begin(len, sha256).await;
-        let (mut offset, max_chunk) = with_reason(self, begin).await?;
+        let result = self.upload_inner(image, len, sha256, &mut progress).await;
+        if result.is_err() {
+            // Leave nothing half-done on the device. Best effort: the device
+            // may already have dropped the upload or be unreachable.
+            let _ = self.abort().await;
+        }
+        result
+    }
+
+    async fn upload_inner(
+        &self,
+        image: &[u8],
+        len: u32,
+        sha256: &[u8; 32],
+        progress: &mut impl FnMut(u32, u32),
+    ) -> Result<(Slot, String)> {
+        let (mut offset, max_chunk) = self.begin_when_ready(len, sha256).await?;
         let chunk_len = usize::from(max_chunk).clamp(64, esp_lan_ota::MAX_CHUNK) & !3;
         let mut failures = 0u32;
         while offset < len {
@@ -312,12 +327,51 @@ impl<'a, C: Crypto> Client<'a, C> {
                     log::warn!("write at {offset} failed ({error:#}); resyncing");
                     async_io::Timer::after(Duration::from_millis(500 * u64::from(failures))).await;
                     // Begin with the same image returns the device's offset.
-                    offset = self.begin(len, sha256).await?.0;
+                    offset = self.begin_when_ready(len, sha256).await?.0;
                 }
             }
         }
-        let finish = self.finish().await;
-        with_reason(self, finish).await
+        match self.finish().await {
+            Ok(staged) => Ok(staged),
+            Err(error) => {
+                // The response may have been lost after the device staged
+                // the image (it reboots 1.5 s later).
+                if let Ok(status) = self.status().await {
+                    if let Some(version) = status.staged_version {
+                        let slot = status.booted.other();
+                        return Ok((slot, version));
+                    }
+                    if status.last_error != 0 {
+                        bail!("{error:#}: {}", status.last_error_text());
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// `begin`, retrying for up to two minutes while the device reports it is
+    /// busy (the app is bringing hardware to a safe state first).
+    async fn begin_when_ready(&self, len: u32, sha256: &[u8; 32]) -> Result<(u32, u16)> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let begin = self.begin(len, sha256).await;
+            let Err(error) = begin else {
+                return begin;
+            };
+            let status = self.status().await.ok();
+            let busy = status.as_ref().is_some_and(|s| s.last_error == 15);
+            if !busy || std::time::Instant::now() > deadline {
+                return match status {
+                    Some(status) if status.last_error != 0 => {
+                        bail!("{error:#}: {}", status.last_error_text())
+                    }
+                    _ => Err(error),
+                };
+            }
+            log::info!("device busy; waiting to start the upload");
+            async_io::Timer::after(Duration::from_secs(2)).await;
+        }
     }
 
     /// Opens a basic commissioning window (AdministratorCommissioning,
@@ -364,16 +418,5 @@ impl<'a, C: Crypto> Client<'a, C> {
     pub async fn last_error(&self) -> Option<&'static str> {
         let status = self.status().await.ok()?;
         (status.last_error != 0).then(|| status.last_error_text())
-    }
-}
-
-/// Fails with the device's reason when a step was refused.
-pub async fn with_reason<C: Crypto, T>(client: &Client<'_, C>, result: Result<T>) -> Result<T> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) => match client.last_error().await {
-            Some(reason) => bail!("{error:#}: {reason}"),
-            None => Err(error),
-        },
     }
 }

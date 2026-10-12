@@ -52,6 +52,8 @@ pub enum UploadError {
     Unconfirmed,
     /// An update is staged; reboot before starting another.
     RebootPending,
+    /// The app is not accepting uploads right now; retry shortly.
+    Busy,
     Flash(FlashError),
 }
 

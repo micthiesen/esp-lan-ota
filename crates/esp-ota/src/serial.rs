@@ -57,11 +57,15 @@ pub fn read_enrollment(port: &str, timeout: Duration) -> Result<Enrollment> {
     let deadline = Instant::now() + timeout;
     let mut line = String::new();
     while Instant::now() < deadline {
-        line.clear();
+        // `read_line` keeps what it read before a timeout, so only clear
+        // after a complete line.
         match reader.read_line(&mut line) {
             Ok(_) => {
                 if let Some(enrollment) = parse_line(&line) {
                     return Ok(enrollment);
+                }
+                if line.ends_with('\n') {
+                    line.clear();
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
